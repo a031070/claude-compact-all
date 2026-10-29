@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-10-30
+
+### Fixed
+
+- Sessions restarted after an update counted as inactive until their next
+  turn. The last activity is now read at start from the transcript file's
+  modification time.
+- The session `/compact-all` is typed in counts as active.
+
+### Changed
+
+- A session that cannot be reached is removed from the list.
+
 ## [0.3.0] - 2026-10-30
 
 ### Added
@@ -38,6 +51,7 @@ All notable changes to this project are documented here. The format follows
 - `/compact-all status`: lists known sessions, their size and the last result.
 - Sessions without user prompts or with under 20,000 context tokens are skipped.
 
+[0.3.1]: https://github.com/a031070/claude-compact-all/releases/tag/v0.3.1
 [0.3.0]: https://github.com/a031070/claude-compact-all/releases/tag/v0.3.0
 [0.2.0]: https://github.com/a031070/claude-compact-all/releases/tag/v0.2.0
 [0.1.0]: https://github.com/a031070/claude-compact-all/releases/tag/v0.1.0
