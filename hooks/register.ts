@@ -3,7 +3,13 @@ import type { EngineInterface, Register } from 'claude-code'
 // Every session running this mod keeps one entry in the shared store, under
 // its own key, so sessions never overwrite each other's writes.
 const PREFIX = 's:'
-const MARKER = '[compact-all] compact-request'
+// The one pending request, which every session polls for. Messages between
+// sessions would need a permission verdict nobody is there to give.
+const REQUEST = 'request'
+const POLL_MS = 15_000
+// A request older than this is not acted on: a session opened next morning
+// must not compact on last night's command.
+const REQUEST_TTL_MS = 30 * 60 * 1000
 // Default for the minTokens option: a smaller session is not worth compacting.
 const MIN_TOKENS = 100_000
 // Entries not refreshed for this long belong to sessions that died silently.
@@ -24,6 +30,15 @@ type Entry = {
   // or, from before this process, when the transcript file was last written.
   lastTurnAt?: number
   lastCompact?: { at: number; result: string }
+  // The `at` of the last request this session took.
+  takenRequest?: number
+}
+
+type Request = {
+  at: number
+  from: string
+  targets: string[]
+  instructions?: string
 }
 
 // This session's own run state; a reload starts it over, which only drops a
@@ -117,6 +132,25 @@ function request($: EngineInterface, instructions?: string): void {
   $.clock.after(1_000, () => void tryCompact($))
 }
 
+// Takes a fresh request naming this session; puts the session back on the
+// list where its entry went missing.
+async function poll($: EngineInterface): Promise<void> {
+  const id = await $.session.id()
+  const own = (await $.store.get(PREFIX + id)) as Entry | undefined
+  if (!own) {
+    await touch($)
+    await transcriptPath($)
+      .then(path => recordActivity($, path))
+      .catch(() => undefined)
+  }
+  const req = (await $.store.get(REQUEST)) as Request | undefined
+  if (!req || !req.targets.includes(id)) return
+  if ((own?.takenRequest ?? 0) >= req.at) return
+  if ((await $.clock.now()) - req.at > REQUEST_TTL_MS) return
+  await touch($, { takenRequest: req.at })
+  request($, req.instructions)
+}
+
 export const register: Register = (on, options) => {
   const hours = Number(options.activeHours ?? ACTIVE_HOURS)
   const activeMs = (Number.isFinite(hours) && hours > 0 ? hours : ACTIVE_HOURS) * HOUR_MS
@@ -129,8 +163,12 @@ export const register: Register = (on, options) => {
       description:
         'Сжать все запущенные сессии, где вы работали (/compact-all [инструкции] | status)',
     })
+    // Polling first: what follows may fail, and the session must still listen.
+    $.clock.every(POLL_MS, () => void poll($).catch(() => undefined))
     await touch($)
-    await recordActivity($, await transcriptPath($))
+    await transcriptPath($)
+      .then(path => recordActivity($, path))
+      .catch(() => undefined)
     return next(e)
   })
 
@@ -160,13 +198,6 @@ export const register: Register = (on, options) => {
     return done
   })
 
-  on('session.receive', async ($, e, next) => {
-    if (e.origin.kind !== 'peer' || !e.text.includes(MARKER)) return next(e)
-    const instructions = e.text.split(MARKER)[1]?.trim() || undefined
-    request($, instructions)
-    return { consumed: 'compact-all: запрос на сжатие принят' }
-  }).catch(($, e, next) => (next.called ? { text: e.text } : next(e)))
-
   on('command.run', { command: 'compact-all' }, async ($, e) => {
     const self = await $.session.id()
     const now = await $.clock.now()
@@ -176,20 +207,27 @@ export const register: Register = (on, options) => {
     const args = e.args.trim()
 
     if (args === 'status') {
+      const req = (await $.store.get(REQUEST)) as Request | undefined
       const lines = all.map(one => {
+        const asked = req?.targets.includes(one.id)
+          ? (one.takenRequest ?? 0) >= req.at
+            ? '  запрос принят'
+            : '  запрос ждёт'
+          : ''
         const last = one.lastCompact
           ? `${new Date(one.lastCompact.at).toLocaleString('ru-RU')} — ${one.lastCompact.result}`
           : 'не сжималась'
         const active = one.lastTurnAt
           ? `активна ${new Date(one.lastTurnAt).toLocaleString('ru-RU')}`
           : 'без активности'
-        return `${one.id === self ? '*' : ' '} ${one.id.slice(0, 8)}  ${one.cwd}  ${one.turns} ход., ~${one.tokens} ток.  ${active}  ${last}`
+        return `${one.id === self ? '*' : ' '} ${one.id.slice(0, 8)}  ${one.cwd}  ${one.turns} ход., ~${one.tokens} ток.  ${active}  ${last}${asked}`
       })
       return { text: [`известные сессии (окно активности: ${activeMs / HOUR_MS} ч)`, ...lines].join('\n') }
     }
 
     const instructions = args || undefined
     const lines: string[] = []
+    const targets: string[] = []
     for (const one of all) {
       const tag = `${one.id.slice(0, 8)} ${one.cwd}`
       if (one.turns === 0) {
@@ -204,27 +242,23 @@ export const register: Register = (on, options) => {
         lines.push(`  ${tag}: пропущена — контекст мал (~${one.tokens} ток.)`)
         continue
       }
-      if (one.id === self) {
-        request($, instructions)
-        lines.push(`  ${tag}: эта сессия — сожмётся следом`)
-        continue
-      }
-      const sent = await $.session.send({
-        to: { sessionId: one.id },
-        text: instructions ? `${MARKER} ${instructions}` : MARKER,
-      })
-      if (sent.isDelivered) {
-        lines.push(`  ${tag}: запрос отправлен`)
-      } else {
-        // A session that cannot be reached is gone: forget it.
-        await $.store.delete(PREFIX + one.id)
-        lines.push(`  ${tag}: не доставлено, убрана из списка — ${sent.reason}`)
-      }
+      targets.push(one.id)
+      lines.push(
+        one.id === self ? `  ${tag}: эта сессия — сожмётся следом` : `  ${tag}: запрос поставлен`,
+      )
     }
     if (lines.length === 0) lines.push('  нет сессий с этим модом')
+    if (targets.length > 0) {
+      const req: Request = { at: now, from: self, targets, instructions }
+      await $.store.set(REQUEST, req)
+      if (targets.includes(self)) {
+        await touch($, { takenRequest: now })
+        request($, instructions)
+      }
+    }
     return {
       text: [
-        'каждая сессия сожмётся, как только закончит текущий ход.',
+        `каждая сессия заберёт запрос в течение ${POLL_MS / 1000} с и сожмётся, как только закончит текущий ход.`,
         ...lines,
         'Итог: /compact-all status',
       ].join('\n'),

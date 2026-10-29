@@ -71,15 +71,19 @@ Change them in the plugin's settings: `/plugin` in a terminal session, then
   mod's own store, under its own key. The last activity is read at start from
   the transcript file's modification time, so work done before a restart
   counts, and is refreshed after each turn. The entry is removed when the
-  session ends, when the session cannot be reached, or after 7 days without a
-  refresh.
-- `/compact-all` reads those entries and sends each eligible session a service
-  message through `$.session.send`.
-- The receiving session's mod takes that message before the model sees it,
-  waits until the session is idle and calls `$.session.compact()`, the same
-  call `/compact` makes. The result is shown as a toast and in `/compact-all status`.
+  session ends or after 7 days without a refresh; a running session whose
+  entry went missing writes it again.
+- `/compact-all` reads those entries and writes one request to the store,
+  naming the eligible sessions.
+- Every session checks the store every 15 seconds. A session named in a
+  request younger than 30 minutes takes it once, waits until it is idle and
+  calls `$.session.compact()`, the same call `/compact` makes. The result is
+  shown as a toast and in `/compact-all status`, which also says whether each
+  session has taken the request.
 
-The mod reads no project files and runs no shell commands.
+No messages pass between sessions, so no permission prompt or auto-mode
+verdict is involved. Besides its own store, the mod reads only the modification
+time of each session's transcript file, and runs no shell commands.
 
 ## Development
 
