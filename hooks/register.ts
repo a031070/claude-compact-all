@@ -20,7 +20,8 @@ type Entry = {
   turns: number
   tokens: number
   lastSeen: number
-  // When a turn of the main conversation last ended: the person's last work.
+  // The person's last work: when a turn of the main conversation last ended,
+  // or, from before this process, when the transcript file was last written.
   lastTurnAt?: number
   lastCompact?: { at: number; result: string }
 }
@@ -45,6 +46,28 @@ async function touch($: EngineInterface, extra: Partial<Entry> = {}): Promise<En
   }
   await $.store.set(PREFIX + id, entry)
   return entry
+}
+
+// Where the engine keeps the session's transcript when no hook has said: the
+// project folder is the root with every other character turned into '-'.
+async function transcriptPath($: EngineInterface): Promise<string | undefined> {
+  const dir =
+    (await $.env.get('CLAUDE_CONFIG_DIR')) ??
+    ((await $.env.get('HOME')) ? `${await $.env.get('HOME')}/.claude` : undefined)
+  if (!dir) return undefined
+  const project = (await $.session.root()).replace(/[^A-Za-z0-9]/g, '-')
+  return `${dir}/projects/${project}/${await $.session.id()}.jsonl`
+}
+
+// A restart writes nothing to the transcript, so its modification time is
+// when the person last worked here, even before the mod loaded.
+async function recordActivity($: EngineInterface, path: string | undefined): Promise<void> {
+  if (!path) return
+  const stat = await $.fs.stat(path).catch(() => undefined)
+  if (!stat || stat.kind !== 'file') return
+  const old = (await $.store.get(PREFIX + (await $.session.id()))) as Entry | undefined
+  if ((old?.lastTurnAt ?? 0) >= stat.mtimeMs) return
+  await touch($, { lastTurnAt: stat.mtimeMs })
 }
 
 async function entries($: EngineInterface): Promise<Entry[]> {
@@ -107,6 +130,13 @@ export const register: Register = (on, options) => {
         'Сжать все запущенные сессии, где вы работали (/compact-all [инструкции] | status)',
     })
     await touch($)
+    await recordActivity($, await transcriptPath($))
+    return next(e)
+  })
+
+  // The classic event carries the engine's own transcript path.
+  on('classic.SessionStart', async ($, e, next) => {
+    await recordActivity($, e.transcript_path)
     return next(e)
   })
 
@@ -140,7 +170,8 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'compact-all' }, async ($, e) => {
     const self = await $.session.id()
     const now = await $.clock.now()
-    await touch($)
+    // Typing the command is work in this session.
+    await touch($, { lastTurnAt: now })
     const all = await entries($)
     const args = e.args.trim()
 
@@ -182,11 +213,13 @@ export const register: Register = (on, options) => {
         to: { sessionId: one.id },
         text: instructions ? `${MARKER} ${instructions}` : MARKER,
       })
-      lines.push(
-        sent.isDelivered
-          ? `  ${tag}: запрос отправлен`
-          : `  ${tag}: не доставлено — ${sent.reason}`,
-      )
+      if (sent.isDelivered) {
+        lines.push(`  ${tag}: запрос отправлен`)
+      } else {
+        // A session that cannot be reached is gone: forget it.
+        await $.store.delete(PREFIX + one.id)
+        lines.push(`  ${tag}: не доставлено, убрана из списка — ${sent.reason}`)
+      }
     }
     if (lines.length === 0) lines.push('  нет сессий с этим модом')
     return {

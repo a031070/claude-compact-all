@@ -122,3 +122,52 @@ test('the minTokens option sets the size floor', { options: { minTokens: 50_000 
 
   expect(out.text).toMatch(/medium: запрос отправлен/)
 })
+
+test('work from before the restart counts, read off the transcript', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  mock.store(on, {
+    's:other': { id: 'other', cwd: '/work/other', turns: 9, tokens: 200_000, lastSeen: NOW },
+  })
+  mock.env(on, { HOME: '/home/me' })
+  // The test plays two sessions in turn: `other` restarts, then `self` asks.
+  let id = 'other'
+  on('session.id', () => ({ value: id }))
+  on('session.root', () => ({ value: `/work/${id}` }))
+  on('session.turns', () => ({ value: 9 }))
+  on('session.usage', () => ({
+    value: { startedAt: 0, context: { tokens: 200_000, window: 1_000_000 }, rateLimits: [] },
+  }))
+  on('command.register', () => ({ value: { command: 'compact-all' } }))
+  const asked: string[] = []
+  on('fs.stat', (_, e) => {
+    asked.push(e.path)
+    return { value: { kind: 'file', size: 1, mtimeMs: NOW - 5 * HOUR, isLink: false } }
+  })
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.send', () => ({ isDelivered: true }))
+
+  await $.session.start({ cwd: '/work/other', surface: 'desktop', isInteractive: true })
+  expect(asked).toContain('/home/me/.claude/projects/-work-other/other.jsonl')
+
+  id = 'self'
+  const out = await $.command.run(RUN)
+  expect(out.text).toMatch(/other: запрос отправлен/)
+})
+
+test('a session that cannot be reached leaves the list', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  mock.store(on, { 's:dead': entry('dead', 5, 150_000), ...SELF })
+  on('session.id', () => ({ value: 'self' }))
+  on('session.root', () => ({ value: '/work/self' }))
+  on('session.turns', () => ({ value: 4 }))
+  on('session.usage', () => ({
+    value: { startedAt: 0, context: { tokens: 160_000, window: 200_000 }, rateLimits: [] },
+  }))
+  on('session.send', () => ({ isDelivered: false, reason: 'not running' }))
+
+  const out = await $.command.run(RUN)
+  expect(out.text).toMatch(/dead: не доставлено, убрана из списка/)
+
+  const status = await $.command.run({ ...RUN, args: 'status' })
+  expect(status.text).not.toMatch(/dead/)
+})

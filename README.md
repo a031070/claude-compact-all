@@ -68,8 +68,11 @@ Change them in the plugin's settings: `/plugin` in a terminal session, then
 
 - On start, every session with the mod writes a small entry (session id,
   folder, turns, context tokens, time of the last answered prompt) to the
-  mod's own store, under its own key. The entry is removed when the session ends; entries not refreshed for 7 days
-  are dropped.
+  mod's own store, under its own key. The last activity is read at start from
+  the transcript file's modification time, so work done before a restart
+  counts, and is refreshed after each turn. The entry is removed when the
+  session ends, when the session cannot be reached, or after 7 days without a
+  refresh.
 - `/compact-all` reads those entries and sends each eligible session a service
   message through `$.session.send`.
 - The receiving session's mod takes that message before the model sees it,
