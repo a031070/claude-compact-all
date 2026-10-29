@@ -50,7 +50,7 @@ Skipped:
 - sessions with no answered prompt in the last 24 hours (the active window,
   see [Settings](#settings));
 - sessions where you sent no prompt;
-- sessions with under 20,000 context tokens;
+- sessions with under 100,000 context tokens (the `minTokens` option);
 - sessions that are not running: a closed session cannot be reached, and the
   report says so.
 
@@ -59,9 +59,10 @@ Skipped:
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `activeHours` | `24` | Only sessions whose last prompt was answered within this many hours are compacted. |
+| `minTokens` | `100000` | Sessions with a smaller context are skipped. |
 
-Change it in the plugin's settings: `/plugin` in a terminal session, then
-**compact-all**. A change reloads the mod with the new value.
+Change them in the plugin's settings: `/plugin` in a terminal session, then
+**compact-all**. A change reloads the mod with the new values.
 
 ## How it works
 
