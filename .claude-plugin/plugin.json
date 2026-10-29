@@ -1,0 +1,10 @@
+{
+  "name": "compact-all",
+  "version": "0.1.0",
+  "description": "/compact-all: on your command, compacts every running Claude Code session you worked in",
+  "author": { "name": "a031070", "url": "https://github.com/a031070" },
+  "homepage": "https://github.com/a031070/claude-compact-all",
+  "repository": "https://github.com/a031070/claude-compact-all",
+  "license": "MIT",
+  "keywords": ["compact", "context", "sessions", "mod"]
+}

@@ -1,0 +1,15 @@
+{
+  "name": "claude-compact-all",
+  "description": "Claude Code mod: compact all running sessions on demand",
+  "owner": {
+    "name": "a031070",
+    "url": "https://github.com/a031070"
+  },
+  "plugins": [
+    {
+      "name": "compact-all",
+      "source": "./",
+      "description": "/compact-all: on your command, compacts every running Claude Code session you worked in"
+    }
+  ]
+}
