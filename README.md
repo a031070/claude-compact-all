@@ -42,8 +42,13 @@ Sessions that were already open load the mod after they restart.
 | `/compact-all <instructions>` | Same, and passes the text to each compaction, like `/compact <instructions>`. |
 | `/compact-all status` | Lists known sessions: folder, turns, context size and the last compaction result. |
 
-Each session compacts **after its current turn ends**, so no running work is
-interrupted. The session you typed the command in compacts too.
+A session that is **working** compacts after its current turn ends, so no
+running work is interrupted. A session that is **idle** is first given one turn
+that sums it up from what is already in the conversation, with no tools and no
+file changes: what is done, what is in progress, what is left, open decisions
+and blockers, branches and PRs. It compacts right after that turn, and the
+compaction is told to keep the summary whole. The session you typed the command
+in is handled the same way.
 
 Skipped:
 
@@ -76,8 +81,10 @@ Change them in the plugin's settings: `/plugin` in a terminal session, then
 - `/compact-all` reads those entries and writes one request to the store,
   naming the eligible sessions.
 - Every session checks the store every 15 seconds. A session named in a
-  request younger than 30 minutes takes it once, waits until it is idle and
-  calls `$.session.compact()`, the same call `/compact` makes. The result is
+  request younger than 30 minutes takes it once. If a turn is running, it waits
+  for the turn to end; if not, it submits the summary prompt with
+  `$.prompt.submit` and waits for that turn to end. Then it calls
+  `$.session.compact()`, the same call `/compact` makes. The result is
   shown as a toast and in `/compact-all status`, which also says whether each
   session has taken the request.
 

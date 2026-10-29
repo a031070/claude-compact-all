@@ -10,6 +10,20 @@ const POLL_MS = 15_000
 // A request older than this is not acted on: a session opened next morning
 // must not compact on last night's command.
 const REQUEST_TTL_MS = 30 * 60 * 1000
+// The turn an idle session is given before it compacts: a compaction alone
+// waits for a turn that, in an idle session, nobody starts.
+const SUMMARY_PROMPT = [
+  '[compact-all] Перед сжатием контекста подведи итог этой сессии по тому, что уже есть в переписке.',
+  'Не запускай команд и инструментов, не меняй файлы. Кратко, списками:',
+  '1. Что сделано.',
+  '2. Что в работе.',
+  '3. Что осталось.',
+  '4. Открытые решения и блокеры.',
+  '5. Ветки и PR (с номерами и ссылками, если они есть в переписке).',
+  'После ответа сессия будет сжата, и этот итог должен пережить сжатие.',
+].join('\n')
+const SUMMARY_KEEP =
+  'Сохрани целиком итог сессии из последнего ответа (подведение итогов compact-all): что сделано, в работе, осталось, решения и блокеры, ветки и PR.'
 // Default for the minTokens option: a smaller session is not worth compacting.
 const MIN_TOKENS = 100_000
 // Entries not refreshed for this long belong to sessions that died silently.
@@ -44,7 +58,14 @@ type Request = {
 // This session's own run state; a reload starts it over, which only drops a
 // request that had not compacted yet.
 let isBusy = false
-let pending: { instructions?: string; tries: number } | undefined
+let pending:
+  | {
+      instructions?: string
+      tries: number
+      // The summary turn this session was given has not ended yet.
+      isAwaitingSummary?: boolean
+    }
+  | undefined
 
 async function touch($: EngineInterface, extra: Partial<Entry> = {}): Promise<Entry> {
   const id = await $.session.id()
@@ -101,7 +122,8 @@ async function entries($: EngineInterface): Promise<Entry[]> {
 }
 
 async function tryCompact($: EngineInterface): Promise<void> {
-  if (!pending || isBusy) return // turn.complete schedules the next try
+  // turn.complete schedules the next try
+  if (!pending || isBusy || pending.isAwaitingSummary) return
   const { instructions } = pending
   try {
     const done = await $.session.compact(instructions ? { instructions } : undefined)
@@ -132,6 +154,23 @@ function request($: EngineInterface, instructions?: string): void {
   $.clock.after(1_000, () => void tryCompact($))
 }
 
+// A busy session compacts when its turn ends; an idle one is first given a
+// turn that sums the session up, and compacts when that turn ends.
+function take($: EngineInterface, instructions?: string): void {
+  if (isBusy) {
+    request($, instructions)
+    return
+  }
+  const keep = instructions ? `${SUMMARY_KEEP}\n${instructions}` : SUMMARY_KEEP
+  pending = { instructions: keep, tries: 0, isAwaitingSummary: true }
+  // Not awaited: the turn starts once the session is idle, which for the
+  // session the command runs in is after this hook returns.
+  void $.prompt.submit({ text: SUMMARY_PROMPT }).catch(() => {
+    // No turn could start: compact as before, with the person's instructions.
+    request($, instructions)
+  })
+}
+
 // Takes a fresh request naming this session; puts the session back on the
 // list where its entry went missing.
 async function poll($: EngineInterface): Promise<void> {
@@ -148,7 +187,7 @@ async function poll($: EngineInterface): Promise<void> {
   if ((own?.takenRequest ?? 0) >= req.at) return
   if ((await $.clock.now()) - req.at > REQUEST_TTL_MS) return
   await touch($, { takenRequest: req.at })
-  request($, req.instructions)
+  take($, req.instructions)
 }
 
 export const register: Register = (on, options) => {
@@ -193,7 +232,10 @@ export const register: Register = (on, options) => {
     if (e.agentId === undefined) {
       isBusy = false
       await touch($, { lastTurnAt: await $.clock.now() })
-      if (pending) $.clock.after(2_000, () => void tryCompact($))
+      if (pending) {
+        pending.isAwaitingSummary = false
+        $.clock.after(2_000, () => void tryCompact($))
+      }
     }
     return done
   })
@@ -253,7 +295,7 @@ export const register: Register = (on, options) => {
       await $.store.set(REQUEST, req)
       if (targets.includes(self)) {
         await touch($, { takenRequest: now })
-        request($, instructions)
+        take($, instructions)
       }
     }
     return {
