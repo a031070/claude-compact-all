@@ -47,8 +47,9 @@ running work is interrupted. A session that is **idle** is first given one turn
 that sums it up from what is already in the conversation, with no tools and no
 file changes: what is done, what is in progress, what is left, open decisions
 and blockers, branches and PRs. It compacts right after that turn, and the
-compaction is told to keep the summary whole. The session you typed the command
-in is handled the same way.
+compaction is told to keep the summary whole. If the summary turn cannot start
+(dropped, refused, or not started within 3 minutes), the session compacts
+without it. The session you typed the command in is handled the same way.
 
 Skipped:
 

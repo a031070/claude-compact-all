@@ -22,6 +22,8 @@ const SUMMARY_PROMPT = [
   '5. Ветки и PR (с номерами и ссылками, если они есть в переписке).',
   'После ответа сессия будет сжата, и этот итог должен пережить сжатие.',
 ].join('\n')
+// A summary turn that has not started by then is given up on.
+const SUMMARY_TIMEOUT_MS = 3 * 60 * 1000
 const SUMMARY_KEEP =
   'Сохрани целиком итог сессии из последнего ответа (подведение итогов compact-all): что сделано, в работе, осталось, решения и блокеры, ветки и PR.'
 // Default for the minTokens option: a smaller session is not worth compacting.
@@ -162,12 +164,24 @@ function take($: EngineInterface, instructions?: string): void {
     return
   }
   const keep = instructions ? `${SUMMARY_KEEP}\n${instructions}` : SUMMARY_KEEP
-  pending = { instructions: keep, tries: 0, isAwaitingSummary: true }
-  // Not awaited: the turn starts once the session is idle, which for the
-  // session the command runs in is after this hook returns.
-  void $.prompt.submit({ text: SUMMARY_PROMPT }).catch(() => {
-    // No turn could start: compact as before, with the person's instructions.
-    request($, instructions)
+  const mine = { instructions: keep, tries: 0, isAwaitingSummary: true }
+  pending = mine
+  // No summary turn after all: compact as before, with the person's own
+  // instructions, unless a newer request took over.
+  const giveUp = () => {
+    if (pending === mine && mine.isAwaitingSummary) request($, instructions)
+  }
+  // Not awaited: the turn starts once the session is idle. A submission the
+  // engine or a hook drops resolves `{ drop }` rather than rejecting.
+  void $.prompt.submit({ text: SUMMARY_PROMPT }).then(
+    entered => {
+      if (entered.drop !== undefined) giveUp()
+    },
+    giveUp,
+  )
+  // Nor may a submission that entered and never ran hold the request forever.
+  $.clock.after(SUMMARY_TIMEOUT_MS, () => {
+    if (!isBusy) giveUp()
   })
 }
 
@@ -286,17 +300,18 @@ export const register: Register = (on, options) => {
       }
       targets.push(one.id)
       lines.push(
-        one.id === self ? `  ${tag}: эта сессия — сожмётся следом` : `  ${tag}: запрос поставлен`,
+        one.id === self
+          ? `  ${tag}: эта сессия — подведёт итог и сожмётся`
+          : `  ${tag}: запрос поставлен`,
       )
     }
     if (lines.length === 0) lines.push('  нет сессий с этим модом')
     if (targets.length > 0) {
       const req: Request = { at: now, from: self, targets, instructions }
       await $.store.set(REQUEST, req)
-      if (targets.includes(self)) {
-        await touch($, { takenRequest: now })
-        take($, instructions)
-      }
+      // This session takes it like any other, from a poll: a prompt cannot be
+      // submitted from inside command.run.
+      if (targets.includes(self)) $.clock.after(1_000, () => void poll($).catch(() => undefined))
     }
     return {
       text: [

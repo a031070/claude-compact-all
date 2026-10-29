@@ -15,6 +15,10 @@ All notable changes to this project are documented here. The format follows
   sessions took the request but compacted only after the next turn.
 - A session in the middle of a turn still gets no new turn: it compacts when
   its own turn ends.
+- Where the summary prompt is dropped, rejected, or has not started within
+  3 minutes, the session compacts at once without it.
+- The session `/compact-all` is typed in takes the request from its own poll a
+  second later, since a prompt cannot be submitted from inside a command.
 
 ## [0.4.0] - 2026-10-30
 
