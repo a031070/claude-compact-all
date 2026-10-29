@@ -47,16 +47,27 @@ interrupted. The session you typed the command in compacts too.
 
 Skipped:
 
+- sessions with no answered prompt in the last 24 hours (the active window,
+  see [Settings](#settings));
 - sessions where you sent no prompt;
 - sessions with under 20,000 context tokens;
 - sessions that are not running: a closed session cannot be reached, and the
   report says so.
 
+## Settings
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `activeHours` | `24` | Only sessions whose last prompt was answered within this many hours are compacted. |
+
+Change it in the plugin's settings: `/plugin` in a terminal session, then
+**compact-all**. A change reloads the mod with the new value.
+
 ## How it works
 
 - On start, every session with the mod writes a small entry (session id,
-  folder, turns, context tokens) to the mod's own store, under its own key.
-  The entry is removed when the session ends; entries not refreshed for 7 days
+  folder, turns, context tokens, time of the last answered prompt) to the
+  mod's own store, under its own key. The entry is removed when the session ends; entries not refreshed for 7 days
   are dropped.
 - `/compact-all` reads those entries and sends each eligible session a service
   message through `$.session.send`.
