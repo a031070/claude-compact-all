@@ -19,12 +19,13 @@ const entry = (
   lastSeen = NOW,
 ) => ({ id, cwd: `/work/${id}`, turns, tokens, lastSeen, lastTurnAt })
 
-const SELF = { 's:self': entry('self', 4, 60_000) }
+const SELF = { 's:self': entry('self', 4, 160_000) }
 
 test('/compact-all asks every worked-in session and skips the rest', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   mock.store(on, {
     's:other': entry('other', 5, 150_000),
+    's:medium': entry('medium', 5, 60_000),
     's:idle': entry('idle', 0, 90_000),
     's:small': entry('small', 2, 5_000),
     's:gone': entry('gone', 3, 80_000, NOW - 30 * DAY, NOW - 30 * DAY),
@@ -35,7 +36,7 @@ test('/compact-all asks every worked-in session and skips the rest', async ($, o
   on('session.root', () => ({ value: '/work/self' }))
   on('session.turns', () => ({ value: 4 }))
   on('session.usage', () => ({
-    value: { startedAt: 0, context: { tokens: 60_000, window: 200_000 }, rateLimits: [] },
+    value: { startedAt: 0, context: { tokens: 160_000, window: 200_000 }, rateLimits: [] },
   }))
   on('command.register', () => ({ value: { command: 'compact-all' } }))
   const sent: string[] = []
@@ -48,7 +49,7 @@ test('/compact-all asks every worked-in session and skips the rest', async ($, o
     compacted += 1
     return {
       messages: [{ role: 'user', text: 'summary', toolUses: [] }],
-      tokensBefore: 60_000, tokensAfter: 8_000 }
+      tokensBefore: 160_000, tokensAfter: 8_000 }
   })
   on('ui.toast', () => ({ value: undefined }))
 
@@ -58,6 +59,7 @@ test('/compact-all asks every worked-in session and skips the rest', async ($, o
   expect(out.text).toMatch(/other: запрос отправлен/)
   expect(out.text).toMatch(/idle: пропущена — вы в ней не работали/)
   expect(out.text).toMatch(/small: пропущена — контекст мал/)
+  expect(out.text).toMatch(/medium: пропущена — контекст мал/)
   expect(out.text).toMatch(/self: эта сессия/)
   expect(out.text).not.toMatch(/gone/)
   expect(out.text).toMatch(/yesterday: пропущена — не было работы за 24 ч/)
@@ -66,7 +68,7 @@ test('/compact-all asks every worked-in session and skips the rest', async ($, o
   expect(compacted).toBe(1)
 
   const status = await $.command.run({ ...RUN, args: 'status' })
-  expect(status.text).toMatch(/сжато 60000→8000 токенов/)
+  expect(status.text).toMatch(/сжато 160000→8000 токенов/)
 })
 
 test('a peer request is taken before the model reads it', async ($, on) => {
@@ -87,15 +89,15 @@ test('a peer request is taken before the model reads it', async ($, on) => {
 test('the activeHours option narrows the window', { options: { activeHours: 6 } }, async ($, on) => {
   mock.clock(on, { now: NOW })
   mock.store(on, {
-    's:recent': entry('recent', 3, 90_000, NOW - 2 * HOUR),
-    's:morning': entry('morning', 3, 90_000, NOW - 8 * HOUR),
+    's:recent': entry('recent', 3, 150_000, NOW - 2 * HOUR),
+    's:morning': entry('morning', 3, 150_000, NOW - 8 * HOUR),
     ...SELF,
   })
   on('session.id', () => ({ value: 'self' }))
   on('session.root', () => ({ value: '/work/self' }))
   on('session.turns', () => ({ value: 4 }))
   on('session.usage', () => ({
-    value: { startedAt: 0, context: { tokens: 60_000, window: 200_000 }, rateLimits: [] },
+    value: { startedAt: 0, context: { tokens: 160_000, window: 200_000 }, rateLimits: [] },
   }))
   on('session.send', () => ({ isDelivered: true }))
 
@@ -103,4 +105,20 @@ test('the activeHours option narrows the window', { options: { activeHours: 6 } 
 
   expect(out.text).toMatch(/recent: запрос отправлен/)
   expect(out.text).toMatch(/morning: пропущена — не было работы за 6 ч/)
+})
+
+test('the minTokens option sets the size floor', { options: { minTokens: 50_000 } }, async ($, on) => {
+  mock.clock(on, { now: NOW })
+  mock.store(on, { 's:medium': entry('medium', 5, 60_000), ...SELF })
+  on('session.id', () => ({ value: 'self' }))
+  on('session.root', () => ({ value: '/work/self' }))
+  on('session.turns', () => ({ value: 4 }))
+  on('session.usage', () => ({
+    value: { startedAt: 0, context: { tokens: 160_000, window: 200_000 }, rateLimits: [] },
+  }))
+  on('session.send', () => ({ isDelivered: true }))
+
+  const out = await $.command.run(RUN)
+
+  expect(out.text).toMatch(/medium: запрос отправлен/)
 })

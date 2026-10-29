@@ -4,8 +4,8 @@ import type { EngineInterface, Register } from 'claude-code'
 // its own key, so sessions never overwrite each other's writes.
 const PREFIX = 's:'
 const MARKER = '[compact-all] compact-request'
-// A session below this many context tokens has nothing worth compacting.
-const MIN_TOKENS = 20_000
+// Default for the minTokens option: a smaller session is not worth compacting.
+const MIN_TOKENS = 100_000
 // Entries not refreshed for this long belong to sessions that died silently.
 const STALE_MS = 7 * 24 * 3600 * 1000
 const HOUR_MS = 3600 * 1000
@@ -97,6 +97,8 @@ function request($: EngineInterface, instructions?: string): void {
 export const register: Register = (on, options) => {
   const hours = Number(options.activeHours ?? ACTIVE_HOURS)
   const activeMs = (Number.isFinite(hours) && hours > 0 ? hours : ACTIVE_HOURS) * HOUR_MS
+  const min = Number(options.minTokens ?? MIN_TOKENS)
+  const minTokens = Number.isFinite(min) && min >= 0 ? min : MIN_TOKENS
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -167,7 +169,7 @@ export const register: Register = (on, options) => {
         lines.push(`  ${tag}: пропущена — не было работы за ${activeMs / HOUR_MS} ч`)
         continue
       }
-      if (one.tokens < MIN_TOKENS) {
+      if (one.tokens < minTokens) {
         lines.push(`  ${tag}: пропущена — контекст мал (~${one.tokens} ток.)`)
         continue
       }

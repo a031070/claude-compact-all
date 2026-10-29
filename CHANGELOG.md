@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-10-30
+
+### Added
+
+- `minTokens` option: sessions with a smaller context are skipped.
+
+### Changed
+
+- The default size floor is now 100,000 context tokens (was 20,000).
+
 ## [0.2.0] - 2026-10-30
 
 ### Added
@@ -28,5 +38,6 @@ All notable changes to this project are documented here. The format follows
 - `/compact-all status`: lists known sessions, their size and the last result.
 - Sessions without user prompts or with under 20,000 context tokens are skipped.
 
+[0.3.0]: https://github.com/a031070/claude-compact-all/releases/tag/v0.3.0
 [0.2.0]: https://github.com/a031070/claude-compact-all/releases/tag/v0.2.0
 [0.1.0]: https://github.com/a031070/claude-compact-all/releases/tag/v0.1.0

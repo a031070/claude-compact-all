@@ -1,6 +1,6 @@
 {
   "name": "compact-all",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "/compact-all: on your command, compacts every running Claude Code session you worked in",
   "author": {
     "name": "a031070",
@@ -23,6 +23,14 @@
       "default": 24,
       "min": 1,
       "max": 720
+    },
+    "minTokens": {
+      "type": "number",
+      "title": "Minimum context, tokens",
+      "description": "Skip sessions whose context is smaller than this",
+      "default": 100000,
+      "min": 0,
+      "max": 1000000
     }
   }
 }
