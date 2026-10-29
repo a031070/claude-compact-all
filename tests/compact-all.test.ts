@@ -23,20 +23,30 @@ const SELF = { 's:self': entry('self', 4, 160_000) }
 
 // The engine beneath the mod, for a session whose id the test may switch: one
 // test process plays several sessions that share one store.
-function engine(on: On, who: { id: string }, env: Record<string, string> = {}) {
+function engine(
+  on: On,
+  who: { id: string },
+  env: Record<string, string> = {},
+  selfTokens = 160_000,
+) {
   on('session.id', () => ({ value: who.id }))
   on('session.root', () => ({ value: `/work/${who.id}` }))
   on('session.turns', () => ({ value: 4 }))
   on('session.usage', () => ({
-    value: { startedAt: 0, context: { tokens: 160_000, window: 200_000 }, rateLimits: [] },
+    value: {
+      startedAt: 0,
+      context: { tokens: who.id === 'self' ? selfTokens : 160_000, window: 200_000 },
+      rateLimits: [],
+    },
   }))
   on('command.register', () => ({ value: { command: 'compact-all' } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('ui.toast', () => ({ value: undefined }))
   mock.env(on, env)
   const compacted: string[] = []
-  on('session.compact', () => {
+  on('session.compact', (_, e) => {
     compacted.push(who.id)
+    keptWith.push(e.instructions ?? '')
     return {
       messages: [{ role: 'user', text: 'summary', toolUses: [] }],
       tokensBefore: 160_000,
@@ -45,6 +55,10 @@ function engine(on: On, who: { id: string }, env: Record<string, string> = {}) {
   })
   return compacted
 }
+
+const keptWith: string[] = []
+
+const TURN = { turnId: 't1', answer: 'итог', durationMs: 1, isAborted: false, reason: 'answer' } as const
 
 test('/compact-all picks the worked-in sessions and skips the rest', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
@@ -67,7 +81,7 @@ test('/compact-all picks the worked-in sessions and skips the rest', async ($, o
   expect(out.text).toMatch(/self: эта сессия/)
   expect(out.text).not.toMatch(/gone/)
 
-  await clock.advance(1_000)
+  await clock.advance(3_000)
   expect(compacted).toEqual(['self'])
 
   const status = await $.command.run({ ...RUN, args: 'status' })
@@ -85,7 +99,7 @@ test('another session takes the request on its next poll, once', async ($, on) =
   await $.session.start({ cwd: '/work/other', surface: 'desktop', isInteractive: true })
   who.id = 'self'
   await $.command.run(RUN)
-  await clock.advance(1_000)
+  await clock.advance(3_000)
   expect(compacted).toEqual(['self'])
 
   who.id = 'other'
@@ -155,4 +169,143 @@ test('work from before the restart counts, read off the transcript', async ($, o
   who.id = 'self'
   const out = await $.command.run(RUN)
   expect(out.text).toMatch(/other: запрос поставлен/)
+})
+
+test('an idle session is given a summary turn, then compacts when it ends', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  mock.store(on, { 's:other': entry('other', 5, 150_000), ...SELF })
+  const who = { id: 'other' }
+  // Both played sessions share the mod's state: keep `self` below the floor.
+  const compacted = engine(on, who, {}, 10_000)
+  const prompts: string[] = []
+  on('prompt.submit', (_, e) => {
+    prompts.push(e.text)
+    return { text: e.text }
+  })
+  on('turn.start', () => ({ turnId: 't1' }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  keptWith.length = 0
+
+  await $.session.start({ cwd: '/work/other', surface: 'desktop', isInteractive: true })
+  who.id = 'self'
+  await $.command.run(RUN)
+  who.id = 'other'
+  prompts.length = 0
+  await clock.advance(15_000)
+
+  // `other` was idle: it gets the summary turn and does not compact yet.
+  expect(prompts.length).toBe(1)
+  expect(prompts[0]).toMatch(/подведи итог/)
+  await clock.advance(30_000)
+  expect(compacted).not.toContain('other')
+
+  await $.turn.start({ text: prompts[0] ?? '', turnId: 't1' })
+  await $.turn.complete(TURN)
+  await clock.advance(2_000)
+  expect(compacted).toContain('other')
+  expect(keptWith.at(-1)).toMatch(/Сохрани целиком итог сессии/)
+})
+
+test('a busy session gets no new turn and compacts when its own turn ends', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  mock.store(on, { 's:other': entry('other', 5, 150_000), ...SELF })
+  const who = { id: 'other' }
+  // Both played sessions share the mod's state: keep `self` below the floor.
+  const compacted = engine(on, who, {}, 10_000)
+  const prompts: string[] = []
+  on('prompt.submit', (_, e) => {
+    prompts.push(e.text)
+    return { text: e.text }
+  })
+  on('turn.start', () => ({ turnId: 't1' }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+
+  await $.session.start({ cwd: '/work/other', surface: 'desktop', isInteractive: true })
+  await $.turn.start({ text: 'работа', turnId: 't1' })
+  who.id = 'self'
+  await $.command.run(RUN)
+  who.id = 'other'
+  prompts.length = 0
+  await clock.advance(15_000)
+  await clock.advance(30_000)
+
+  expect(prompts).toEqual([])
+  expect(compacted).not.toContain('other')
+
+  await $.turn.complete(TURN)
+  await clock.advance(2_000)
+  expect(compacted).toContain('other')
+  expect(prompts).toEqual([])
+})
+
+test('the session the command runs in submits its summary from a poll, not from the command', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  mock.store(on, SELF)
+  const compacted = engine(on, { id: 'self' })
+  const prompts: string[] = []
+  let isInCommand = false
+  const fromCommand: string[] = []
+  on('prompt.submit', (_, e) => {
+    prompts.push(e.text)
+    if (isInCommand) fromCommand.push(e.text)
+    return { text: e.text }
+  })
+  on('turn.start', () => ({ turnId: 't1' }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('command.run', async (_, e, next) => {
+    isInCommand = true
+    try {
+      return await next(e)
+    } finally {
+      isInCommand = false
+    }
+  })
+
+  const out = await $.command.run(RUN)
+  expect(out.text).toMatch(/self: эта сессия — подведёт итог и сожмётся/)
+  expect(prompts).toEqual([])
+
+  await clock.advance(1_000)
+  expect(prompts.length).toBe(1)
+  expect(fromCommand).toEqual([])
+  expect(compacted).toEqual([])
+
+  await $.turn.start({ text: prompts[0] ?? '', turnId: 't1' })
+  await $.turn.complete(TURN)
+  await clock.advance(2_000)
+  expect(compacted).toEqual(['self'])
+})
+
+test('a dropped summary prompt falls back to compacting at once', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  mock.store(on, SELF)
+  const compacted = engine(on, { id: 'self' })
+  let sent = 0
+  on('prompt.submit', () => {
+    sent += 1
+    return { drop: 'stopped by the person' }
+  })
+
+  await $.command.run(RUN)
+  await clock.advance(3_000)
+
+  expect(sent).toBe(1)
+  expect(compacted).toEqual(['self'])
+  const status = await $.command.run({ ...RUN, args: 'status' })
+  expect(status.text).toMatch(/сжато/)
+})
+
+test('a summary prompt that enters and never runs is given up on', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  mock.store(on, SELF)
+  const compacted = engine(on, { id: 'self' })
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+
+  await $.command.run(RUN)
+  await clock.advance(60_000)
+  expect(compacted).toEqual([])
+
+  await clock.advance(3 * 60_000)
+  await clock.advance(2_000)
+  expect(compacted).toEqual(['self'])
 })

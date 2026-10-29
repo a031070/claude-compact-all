@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-10-30
+
+### Changed
+
+- An idle session no longer waits for someone to start a turn. It is given one
+  turn that sums the session up (done, in progress, left, open decisions and
+  blockers, branches and PRs), without tools or file changes, and compacts
+  right after it, with instructions to keep that summary whole. In 0.4.0 idle
+  sessions took the request but compacted only after the next turn.
+- A session in the middle of a turn still gets no new turn: it compacts when
+  its own turn ends.
+- Where the summary prompt is dropped, rejected, or has not started within
+  3 minutes, the session compacts at once without it.
+- The session `/compact-all` is typed in takes the request from its own poll a
+  second later, since a prompt cannot be submitted from inside a command.
+
 ## [0.4.0] - 2026-10-30
 
 ### Changed
@@ -68,6 +84,7 @@ All notable changes to this project are documented here. The format follows
 - `/compact-all status`: lists known sessions, their size and the last result.
 - Sessions without user prompts or with under 20,000 context tokens are skipped.
 
+[0.5.0]: https://github.com/a031070/claude-compact-all/releases/tag/v0.5.0
 [0.4.0]: https://github.com/a031070/claude-compact-all/releases/tag/v0.4.0
 [0.3.1]: https://github.com/a031070/claude-compact-all/releases/tag/v0.3.1
 [0.3.0]: https://github.com/a031070/claude-compact-all/releases/tag/v0.3.0
