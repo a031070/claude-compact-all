@@ -1,6 +1,6 @@
 {
   "name": "compact-all",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "/compact-all: on your command, compacts every running Claude Code session you worked in",
   "author": {
     "name": "a031070",

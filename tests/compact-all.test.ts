@@ -1,6 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
+import type { On } from 'claude-code'
 
 const DAY = 24 * 3600 * 1000
+const HOUR = 3600 * 1000
 const NOW = 100 * DAY
 const RUN = {
   command: 'compact-all',
@@ -8,8 +10,6 @@ const RUN = {
   origin: { kind: 'composer' },
   presentation: { isFullscreen: false, columns: 100 },
 } as const
-
-const HOUR = 3600 * 1000
 
 const entry = (
   id: string,
@@ -21,69 +21,94 @@ const entry = (
 
 const SELF = { 's:self': entry('self', 4, 160_000) }
 
-test('/compact-all asks every worked-in session and skips the rest', async ($, on) => {
-  const clock = mock.clock(on, { now: NOW })
-  mock.store(on, {
-    's:other': entry('other', 5, 150_000),
-    's:medium': entry('medium', 5, 60_000),
-    's:idle': entry('idle', 0, 90_000),
-    's:small': entry('small', 2, 5_000),
-    's:gone': entry('gone', 3, 80_000, NOW - 30 * DAY, NOW - 30 * DAY),
-    's:yesterday': entry('yesterday', 7, 120_000, NOW - 30 * HOUR),
-    ...SELF,
-  })
-  on('session.id', () => ({ value: 'self' }))
-  on('session.root', () => ({ value: '/work/self' }))
+// The engine beneath the mod, for a session whose id the test may switch: one
+// test process plays several sessions that share one store.
+function engine(on: On, who: { id: string }, env: Record<string, string> = {}) {
+  on('session.id', () => ({ value: who.id }))
+  on('session.root', () => ({ value: `/work/${who.id}` }))
   on('session.turns', () => ({ value: 4 }))
   on('session.usage', () => ({
     value: { startedAt: 0, context: { tokens: 160_000, window: 200_000 }, rateLimits: [] },
   }))
   on('command.register', () => ({ value: { command: 'compact-all' } }))
-  const sent: string[] = []
-  on('session.send', (_, e) => {
-    sent.push(e.to)
-    return { isDelivered: true }
-  })
-  let compacted = 0
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('ui.toast', () => ({ value: undefined }))
+  mock.env(on, env)
+  const compacted: string[] = []
   on('session.compact', () => {
-    compacted += 1
+    compacted.push(who.id)
     return {
       messages: [{ role: 'user', text: 'summary', toolUses: [] }],
-      tokensBefore: 160_000, tokensAfter: 8_000 }
+      tokensBefore: 160_000,
+      tokensAfter: 8_000,
+    }
   })
-  on('ui.toast', () => ({ value: undefined }))
+  return compacted
+}
+
+test('/compact-all picks the worked-in sessions and skips the rest', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  mock.store(on, {
+    's:other': entry('other', 5, 150_000),
+    's:medium': entry('medium', 5, 60_000),
+    's:idle': entry('idle', 0, 190_000),
+    's:gone': entry('gone', 3, 180_000, NOW - 30 * DAY, NOW - 30 * DAY),
+    's:yesterday': entry('yesterday', 7, 120_000, NOW - 30 * HOUR),
+    ...SELF,
+  })
+  const compacted = engine(on, { id: 'self' })
 
   const out = await $.command.run(RUN)
 
-  expect(sent.length).toBe(1)
-  expect(out.text).toMatch(/other: запрос отправлен/)
+  expect(out.text).toMatch(/other: запрос поставлен/)
   expect(out.text).toMatch(/idle: пропущена — вы в ней не работали/)
-  expect(out.text).toMatch(/small: пропущена — контекст мал/)
   expect(out.text).toMatch(/medium: пропущена — контекст мал/)
+  expect(out.text).toMatch(/yesterday: пропущена — не было работы за 24 ч/)
   expect(out.text).toMatch(/self: эта сессия/)
   expect(out.text).not.toMatch(/gone/)
-  expect(out.text).toMatch(/yesterday: пропущена — не было работы за 24 ч/)
 
   await clock.advance(1_000)
-  expect(compacted).toBe(1)
+  expect(compacted).toEqual(['self'])
 
   const status = await $.command.run({ ...RUN, args: 'status' })
   expect(status.text).toMatch(/сжато 160000→8000 токенов/)
+  expect(status.text).toMatch(/other .*запрос ждёт/)
 })
 
-test('a peer request is taken before the model reads it', async ($, on) => {
-  mock.clock(on, { now: NOW })
-  mock.store(on)
-  on('session.receive', (_, e) => ({ text: e.text }))
+test('another session takes the request on its next poll, once', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  mock.store(on, { 's:other': entry('other', 5, 150_000), ...SELF })
+  const who = { id: 'other' }
+  const compacted = engine(on, who)
 
-  const plain = await $.session.receive({ origin: { kind: 'peer' }, text: 'hello' })
-  expect(plain.text).toBe('hello')
+  // `other` is running and polling; `self` types the command.
+  await $.session.start({ cwd: '/work/other', surface: 'desktop', isInteractive: true })
+  who.id = 'self'
+  await $.command.run(RUN)
+  await clock.advance(1_000)
+  expect(compacted).toEqual(['self'])
 
-  const taken = await $.session.receive({
-    origin: { kind: 'peer', plugin: 'compact-all' },
-    text: '[compact-all] compact-request',
+  who.id = 'other'
+  await clock.advance(15_000)
+  await clock.advance(1_000)
+  expect(compacted).toEqual(['self', 'other'])
+
+  await clock.advance(60_000)
+  expect(compacted).toEqual(['self', 'other'])
+})
+
+test('a stale request is not acted on', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  mock.store(on, {
+    's:other': entry('other', 5, 150_000),
+    request: { at: NOW - HOUR, from: 'self', targets: ['other'] },
   })
-  expect(taken.consumed).toBeDefined()
+  const compacted = engine(on, { id: 'other' })
+
+  await $.session.start({ cwd: '/work/other', surface: 'desktop', isInteractive: true })
+  await clock.advance(20_000)
+
+  expect(compacted).toEqual([])
 })
 
 test('the activeHours option narrows the window', { options: { activeHours: 6 } }, async ($, on) => {
@@ -93,34 +118,22 @@ test('the activeHours option narrows the window', { options: { activeHours: 6 } 
     's:morning': entry('morning', 3, 150_000, NOW - 8 * HOUR),
     ...SELF,
   })
-  on('session.id', () => ({ value: 'self' }))
-  on('session.root', () => ({ value: '/work/self' }))
-  on('session.turns', () => ({ value: 4 }))
-  on('session.usage', () => ({
-    value: { startedAt: 0, context: { tokens: 160_000, window: 200_000 }, rateLimits: [] },
-  }))
-  on('session.send', () => ({ isDelivered: true }))
+  engine(on, { id: 'self' })
 
   const out = await $.command.run(RUN)
 
-  expect(out.text).toMatch(/recent: запрос отправлен/)
+  expect(out.text).toMatch(/recent: запрос поставлен/)
   expect(out.text).toMatch(/morning: пропущена — не было работы за 6 ч/)
 })
 
 test('the minTokens option sets the size floor', { options: { minTokens: 50_000 } }, async ($, on) => {
   mock.clock(on, { now: NOW })
   mock.store(on, { 's:medium': entry('medium', 5, 60_000), ...SELF })
-  on('session.id', () => ({ value: 'self' }))
-  on('session.root', () => ({ value: '/work/self' }))
-  on('session.turns', () => ({ value: 4 }))
-  on('session.usage', () => ({
-    value: { startedAt: 0, context: { tokens: 160_000, window: 200_000 }, rateLimits: [] },
-  }))
-  on('session.send', () => ({ isDelivered: true }))
+  engine(on, { id: 'self' })
 
   const out = await $.command.run(RUN)
 
-  expect(out.text).toMatch(/medium: запрос отправлен/)
+  expect(out.text).toMatch(/medium: запрос поставлен/)
 })
 
 test('work from before the restart counts, read off the transcript', async ($, on) => {
@@ -128,46 +141,18 @@ test('work from before the restart counts, read off the transcript', async ($, o
   mock.store(on, {
     's:other': { id: 'other', cwd: '/work/other', turns: 9, tokens: 200_000, lastSeen: NOW },
   })
-  mock.env(on, { HOME: '/home/me' })
-  // The test plays two sessions in turn: `other` restarts, then `self` asks.
-  let id = 'other'
-  on('session.id', () => ({ value: id }))
-  on('session.root', () => ({ value: `/work/${id}` }))
-  on('session.turns', () => ({ value: 9 }))
-  on('session.usage', () => ({
-    value: { startedAt: 0, context: { tokens: 200_000, window: 1_000_000 }, rateLimits: [] },
-  }))
-  on('command.register', () => ({ value: { command: 'compact-all' } }))
+  const who = { id: 'other' }
+  engine(on, who, { HOME: '/home/me' })
   const asked: string[] = []
   on('fs.stat', (_, e) => {
     asked.push(e.path)
     return { value: { kind: 'file', size: 1, mtimeMs: NOW - 5 * HOUR, isLink: false } }
   })
-  on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('session.send', () => ({ isDelivered: true }))
 
   await $.session.start({ cwd: '/work/other', surface: 'desktop', isInteractive: true })
   expect(asked).toContain('/home/me/.claude/projects/-work-other/other.jsonl')
 
-  id = 'self'
+  who.id = 'self'
   const out = await $.command.run(RUN)
-  expect(out.text).toMatch(/other: запрос отправлен/)
-})
-
-test('a session that cannot be reached leaves the list', async ($, on) => {
-  mock.clock(on, { now: NOW })
-  mock.store(on, { 's:dead': entry('dead', 5, 150_000), ...SELF })
-  on('session.id', () => ({ value: 'self' }))
-  on('session.root', () => ({ value: '/work/self' }))
-  on('session.turns', () => ({ value: 4 }))
-  on('session.usage', () => ({
-    value: { startedAt: 0, context: { tokens: 160_000, window: 200_000 }, rateLimits: [] },
-  }))
-  on('session.send', () => ({ isDelivered: false, reason: 'not running' }))
-
-  const out = await $.command.run(RUN)
-  expect(out.text).toMatch(/dead: не доставлено, убрана из списка/)
-
-  const status = await $.command.run({ ...RUN, args: 'status' })
-  expect(status.text).not.toMatch(/dead/)
+  expect(out.text).toMatch(/other: запрос поставлен/)
 })
