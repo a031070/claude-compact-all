@@ -8,6 +8,9 @@ const MARKER = '[compact-all] compact-request'
 const MIN_TOKENS = 20_000
 // Entries not refreshed for this long belong to sessions that died silently.
 const STALE_MS = 7 * 24 * 3600 * 1000
+const HOUR_MS = 3600 * 1000
+// Default for the activeHours option: only sessions worked in this recently.
+const ACTIVE_HOURS = 24
 const RETRY_MS = 15_000
 const MAX_TRIES = 40
 
@@ -17,6 +20,8 @@ type Entry = {
   turns: number
   tokens: number
   lastSeen: number
+  // When a turn of the main conversation last ended: the person's last work.
+  lastTurnAt?: number
   lastCompact?: { at: number; result: string }
 }
 
@@ -89,7 +94,10 @@ function request($: EngineInterface, instructions?: string): void {
   $.clock.after(1_000, () => void tryCompact($))
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  const hours = Number(options.activeHours ?? ACTIVE_HOURS)
+  const activeMs = (Number.isFinite(hours) && hours > 0 ? hours : ACTIVE_HOURS) * HOUR_MS
+
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'compact-all',
@@ -114,7 +122,7 @@ export const register: Register = on => {
     const done = await next(e)
     if (e.agentId === undefined) {
       isBusy = false
-      await touch($)
+      await touch($, { lastTurnAt: await $.clock.now() })
       if (pending) $.clock.after(2_000, () => void tryCompact($))
     }
     return done
@@ -129,6 +137,7 @@ export const register: Register = on => {
 
   on('command.run', { command: 'compact-all' }, async ($, e) => {
     const self = await $.session.id()
+    const now = await $.clock.now()
     await touch($)
     const all = await entries($)
     const args = e.args.trim()
@@ -138,9 +147,12 @@ export const register: Register = on => {
         const last = one.lastCompact
           ? `${new Date(one.lastCompact.at).toLocaleString('ru-RU')} — ${one.lastCompact.result}`
           : 'не сжималась'
-        return `${one.id === self ? '*' : ' '} ${one.id.slice(0, 8)}  ${one.cwd}  ${one.turns} ход., ~${one.tokens} ток.  ${last}`
+        const active = one.lastTurnAt
+          ? `активна ${new Date(one.lastTurnAt).toLocaleString('ru-RU')}`
+          : 'без активности'
+        return `${one.id === self ? '*' : ' '} ${one.id.slice(0, 8)}  ${one.cwd}  ${one.turns} ход., ~${one.tokens} ток.  ${active}  ${last}`
       })
-      return { text: ['известные сессии', ...lines].join('\n') }
+      return { text: [`известные сессии (окно активности: ${activeMs / HOUR_MS} ч)`, ...lines].join('\n') }
     }
 
     const instructions = args || undefined
@@ -149,6 +161,10 @@ export const register: Register = on => {
       const tag = `${one.id.slice(0, 8)} ${one.cwd}`
       if (one.turns === 0) {
         lines.push(`  ${tag}: пропущена — вы в ней не работали`)
+        continue
+      }
+      if (one.lastTurnAt === undefined || now - one.lastTurnAt > activeMs) {
+        lines.push(`  ${tag}: пропущена — не было работы за ${activeMs / HOUR_MS} ч`)
         continue
       }
       if (one.tokens < MIN_TOKENS) {
